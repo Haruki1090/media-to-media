@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# 共通ライブラリを読み込み
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+# 使用方法
+usage() {
+    echo -e "${CYAN}使用方法:${NC}"
+    echo "  mp4tomp3hq file1.mp4 [file2.mp4 ...]"
+    echo
+    echo -e "${CYAN}説明:${NC}"
+    echo "  MP4ファイルをMP3（320kbps 高音質）に変換します"
+    echo
+    echo -e "${CYAN}例:${NC}"
+    echo "  mp4tomp3hq video.mp4"
+    echo "  mp4tomp3hq *.mp4"
+}
+
+# ヘルプオプションの処理
+if [[ "$1" == "-h" || "$1" == "--help" || $# -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+# 依存関係チェック
+if ! check_dependency "ffmpeg" "ffmpeg"; then
+    echo -e "${YELLOW}macOS: brew install ffmpeg${NC}"
+    echo -e "${YELLOW}Ubuntu: sudo apt install ffmpeg${NC}"
+    exit 1
+fi
+
+# MP4→MP3(高音質)変換関数
+mp4tomp3hq() {
+    local files=("$@")
+    local total=${#files[@]}
+    local current=0
+    local start_time=$(date +%s)
+    
+    echo -e "${PURPLE}🎵 MP4→MP3変換(高音質)を開始します (${total}ファイル)${NC}\n"
+    
+    for file in "${files[@]}"; do
+        if check_file_extension "$file" "mp4"; then
+            ((current++))
+            output="${file%.*}.mp3"
+            input_size=$(get_file_size "$file")
+            
+            echo -e "${YELLOW}📁 ファイル ${current}/${total}:${NC} $(basename "$file")"
+            echo -e "${BLUE}   入力サイズ:${NC} $(format_size $input_size)"
+            echo -e "${BLUE}   出力先:${NC} $(basename "$output") ${CYAN}(320kbps 高音質)${NC}"
+            
+            local file_start=$(date +%s)
+            if ffmpeg -i "$file" -vn -acodec mp3 -ab 320k "$output" -loglevel error -hide_banner; then
+                local file_end=$(date +%s)
+                local file_duration=$((file_end - file_start))
+                local output_size=$(get_file_size "$output")
+                
+                echo -e "${GREEN}   ✅ 完了${NC} ($(format_duration $file_duration)) - 出力: $(format_size $output_size)"
+                show_progress $current $total
+                echo
+            else
+                echo -e "${RED}   ❌ エラー: 変換に失敗しました${NC}"
+            fi
+        fi
+        echo
+    done
+    
+    local end_time=$(date +%s)
+    local total_duration=$((end_time - start_time))
+    echo -e "\n${GREEN}🎉 すべての変換が完了しました！${NC}"
+    echo -e "${WHITE}総処理時間: $(format_duration $total_duration)${NC}"
+}
+
+# メイン実行
+mp4tomp3hq "$@" 

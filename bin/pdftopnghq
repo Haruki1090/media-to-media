@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# 共通ライブラリを読み込み
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+# 使用方法
+usage() {
+    echo -e "${CYAN}使用方法:${NC}"
+    echo "  pdftopnghq file1.pdf [file2.pdf ...]"
+    echo
+    echo -e "${CYAN}説明:${NC}"
+    echo "  PDFファイルをPNG（300dpi 高品質）に変換します"
+    echo
+    echo -e "${CYAN}例:${NC}"
+    echo "  pdftopnghq document.pdf"
+    echo "  pdftopnghq *.pdf"
+}
+
+# ヘルプオプションの処理
+if [[ "$1" == "-h" || "$1" == "--help" || $# -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+# 依存関係チェック
+if ! check_dependency "pdftoppm" "poppler-utils"; then
+    echo -e "${YELLOW}macOS: brew install poppler${NC}"
+    echo -e "${YELLOW}Ubuntu: sudo apt install poppler-utils${NC}"
+    exit 1
+fi
+
+# PDF→PNG(高品質)変換関数
+pdftopnghq() {
+    local files=("$@")
+    local total=${#files[@]}
+    local current=0
+    local start_time=$(date +%s)
+    
+    echo -e "${PURPLE}📄 PDF→PNG変換(高品質)を開始します (${total}ファイル)${NC}\n"
+    
+    for file in "${files[@]}"; do
+        if check_file_extension "$file" "pdf"; then
+            ((current++))
+            basename="${file%.*}"
+            input_size=$(get_file_size "$file")
+            
+            echo -e "${YELLOW}📁 ファイル ${current}/${total}:${NC} $(basename "$file")"
+            echo -e "${BLUE}   入力サイズ:${NC} $(format_size $input_size)"
+            echo -e "${BLUE}   出力先:${NC} ${basename}_page*.png ${CYAN}(300dpi 高品質)${NC}"
+            
+            local file_start=$(date +%s)
+            if pdftoppm -png -r 300 "$file" "${basename}_page" >/dev/null 2>&1; then
+                local file_end=$(date +%s)
+                local file_duration=$((file_end - file_start))
+                local png_count=$(ls "${basename}_page"*.png 2>/dev/null | wc -l)
+                
+                echo -e "${GREEN}   ✅ 完了${NC} ($(format_duration $file_duration)) - ${png_count}ページ生成"
+                show_progress $current $total
+                echo
+            else
+                echo -e "${RED}   ❌ エラー: 変換に失敗しました${NC}"
+            fi
+        fi
+        echo
+    done
+    
+    local end_time=$(date +%s)
+    local total_duration=$((end_time - start_time))
+    echo -e "\n${GREEN}🎉 すべての変換が完了しました！${NC}"
+    echo -e "${WHITE}総処理時間: $(format_duration $total_duration)${NC}"
+}
+
+# メイン実行
+pdftopnghq "$@" 
