@@ -428,7 +428,33 @@ git pull origin main
 
 ---
 
-**作成者**: AI Assistant  
-**バージョン**: 1.1.0  
-**最終更新**: 2024-12-19
-**新機能**: 並列処理、設定管理、ログ機能、通知機能、バッチ処理、静止画抽出
+## 📞 Contact & Info
+
+<div align="center">
+
+### 🧑‍💻 Created by **Haruki Inoue**
+
+[![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg?style=for-the-badge)](https://github.com/Haruki1090/media-to-media)
+[![Last Updated](https://img.shields.io/badge/Last%20Updated-2025--07--02-green.svg?style=for-the-badge)](https://github.com/Haruki1090/media-to-media)
+
+### 🌟 **新機能** 
+`並列処理` • `設定管理` • `ログ機能` • `通知機能` • `バッチ処理` • `静止画抽出`
+
+### 🔗 **Connect with me**
+
+[![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/Haruki_dev)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/haruki1090/)
+[![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Haruki1090)
+
+### ⭐ **If you found this tool helpful, please consider giving it a star!**
+
+[![GitHub stars](https://img.shields.io/github/stars/Haruki1090/media-to-media?style=social)](https://github.com/Haruki1090/media-to-media/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Haruki1090/media-to-media?style=social)](https://github.com/Haruki1090/media-to-media/network)
+
+</div>
+
+---
+
+<div align="center">
+  <sub>Built with ❤️ by <a href="https://github.com/Haruki1090">Haruki Inoue</a></sub>
+</div>
