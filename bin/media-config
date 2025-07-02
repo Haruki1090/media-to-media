@@ -1,0 +1,266 @@
+#!/bin/bash
+
+# 共通ライブラリを読み込み
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+# 使用方法
+usage() {
+    echo -e "${CYAN}${BOLD}⚙️ Media-to-Media 設定管理ツール${NC}"
+    echo
+    echo -e "${CYAN}使用方法:${NC}"
+    echo "  media-config [コマンド] [オプション]"
+    echo
+    echo -e "${CYAN}コマンド:${NC}"
+    echo "  show                 現在の設定を表示"
+    echo "  stats                変換統計を表示"
+    echo "  set <key> <value>    設定値を変更"
+    echo "  reset                設定をデフォルトにリセット"
+    echo "  logs                 ログファイルを表示"
+    echo "  cleanup              古いログファイルを削除"
+    echo "  update               アップデートをチェック"
+    echo "  test                 システムをテスト"
+    echo
+    echo -e "${CYAN}設定可能な項目:${NC}"
+    echo -e "${WHITE}  PARALLEL_JOBS${NC}       並列処理数 (1-16)"
+    echo -e "${WHITE}  ENABLE_NOTIFICATIONS${NC} 通知の有効/無効 (true/false)"
+    echo -e "${WHITE}  ENABLE_LOGGING${NC}      ログの有効/無効 (true/false)"
+    echo -e "${WHITE}  MP3_QUALITY${NC}         MP3音質 (128k, 192k, 256k, 320k)"
+    echo -e "${WHITE}  AAC_QUALITY${NC}         AAC音質 (128k, 192k, 256k, 320k)"
+    echo -e "${WHITE}  PNG_DPI${NC}             PNG解像度 (72, 150, 300, 600)"
+    echo -e "${WHITE}  JPG_DPI${NC}             JPG解像度 (72, 150, 300, 600)"
+    echo -e "${WHITE}  JPG_QUALITY${NC}         JPG品質 (50-100)"
+    echo -e "${WHITE}  DELETE_ORIGINAL${NC}     元ファイル削除 (true/false)"
+    echo
+    echo -e "${CYAN}例:${NC}"
+    echo "  media-config show"
+    echo "  media-config set PARALLEL_JOBS 8"
+    echo "  media-config set MP3_QUALITY 320k"
+    echo "  media-config stats"
+}
+
+# 設定値更新
+update_config() {
+    local key=$1
+    local value=$2
+    
+    # 値の妥当性チェック
+    case $key in
+        PARALLEL_JOBS)
+            if ! [[ "$value" =~ ^[1-9][0-6]?$ ]] || [[ $value -gt 16 ]]; then
+                echo -e "${RED}❌ エラー: 並列処理数は1-16の範囲で指定してください${NC}"
+                return 1
+            fi
+            ;;
+        ENABLE_NOTIFICATIONS|ENABLE_LOGGING|DELETE_ORIGINAL)
+            if [[ "$value" != "true" && "$value" != "false" ]]; then
+                echo -e "${RED}❌ エラー: true または false を指定してください${NC}"
+                return 1
+            fi
+            ;;
+        MP3_QUALITY|AAC_QUALITY)
+            if [[ ! "$value" =~ ^(128k|192k|256k|320k)$ ]]; then
+                echo -e "${RED}❌ エラー: 音質は 128k, 192k, 256k, 320k のいずれかを指定してください${NC}"
+                return 1
+            fi
+            ;;
+        PNG_DPI|JPG_DPI)
+            if [[ ! "$value" =~ ^(72|150|300|600)$ ]]; then
+                echo -e "${RED}❌ エラー: 解像度は 72, 150, 300, 600 のいずれかを指定してください${NC}"
+                return 1
+            fi
+            ;;
+        JPG_QUALITY)
+            if ! [[ "$value" =~ ^[5-9][0-9]$|^100$ ]] || [[ $value -lt 50 ]]; then
+                echo -e "${RED}❌ エラー: JPG品質は50-100の範囲で指定してください${NC}"
+                return 1
+            fi
+            ;;
+        *)
+            echo -e "${RED}❌ エラー: 不明な設定項目: $key${NC}"
+            echo -e "${YELLOW}利用可能な設定項目は --help で確認してください${NC}"
+            return 1
+            ;;
+    esac
+    
+    # 設定ファイル更新
+    if grep -q "^$key=" "$CONFIG_FILE"; then
+        # macOS と Linux の sed の違いに対応
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s/^$key=.*/$key=$value/" "$CONFIG_FILE"
+        else
+            sed -i "s/^$key=.*/$key=$value/" "$CONFIG_FILE"
+        fi
+    else
+        echo "$key=$value" >> "$CONFIG_FILE"
+    fi
+    
+    echo -e "${GREEN}✅ 設定を更新しました: $key = $value${NC}"
+    log_info "設定更新: $key=$value"
+}
+
+# ログファイル表示
+show_logs() {
+    local lines=${1:-50}
+    
+    if [[ -f "$LOG_FILE" ]]; then
+        echo -e "${CYAN}📋 最新のログ (${lines}行):${NC}"
+        echo -e "${WHITE}ファイル: $LOG_FILE${NC}"
+        echo
+        tail -n "$lines" "$LOG_FILE" | while IFS= read -r line; do
+            case $line in
+                *ERROR*)
+                    echo -e "${RED}$line${NC}"
+                    ;;
+                *SUCCESS*)
+                    echo -e "${GREEN}$line${NC}"
+                    ;;
+                *INFO*)
+                    echo -e "${BLUE}$line${NC}"
+                    ;;
+                *)
+                    echo "$line"
+                    ;;
+            esac
+        done
+    else
+        echo -e "${YELLOW}⚠️  ログファイルが見つかりません${NC}"
+    fi
+}
+
+# ログクリーンアップ
+cleanup_logs() {
+    if [[ -f "$LOG_FILE" ]]; then
+        local size=$(get_file_size "$LOG_FILE")
+        local formatted_size=$(format_size $size)
+        
+        echo -e "${BLUE}🧹 ログファイルをクリーンアップしています...${NC}"
+        echo -e "${WHITE}現在のサイズ: $formatted_size${NC}"
+        
+        # 最新の1000行のみ保持
+        tail -n 1000 "$LOG_FILE" > "$LOG_FILE.tmp"
+        mv "$LOG_FILE.tmp" "$LOG_FILE"
+        
+        local new_size=$(get_file_size "$LOG_FILE")
+        local new_formatted_size=$(format_size $new_size)
+        
+        echo -e "${GREEN}✅ クリーンアップ完了${NC}"
+        echo -e "${WHITE}新しいサイズ: $new_formatted_size${NC}"
+        log_info "ログファイルクリーンアップ実行"
+    else
+        echo -e "${YELLOW}⚠️  ログファイルが見つかりません${NC}"
+    fi
+}
+
+# システムテスト
+run_tests() {
+    echo -e "${BLUE}🔍 システムテストを実行しています...${NC}"
+    echo
+    
+    local tests_passed=0
+    local tests_total=0
+    
+    # 依存関係テスト
+    echo -e "${CYAN}📦 依存関係テスト:${NC}"
+    ((tests_total++))
+    if check_dependency "ffmpeg" "ffmpeg" && check_dependency "pdftoppm" "poppler-utils"; then
+        echo -e "${GREEN}✅ すべての依存関係が利用可能です${NC}"
+        ((tests_passed++))
+    else
+        echo -e "${RED}❌ 依存関係が不足しています${NC}"
+    fi
+    
+    # 設定ファイルテスト
+    echo -e "${CYAN}⚙️  設定ファイルテスト:${NC}"
+    ((tests_total++))
+    if [[ -f "$CONFIG_FILE" ]] && [[ -r "$CONFIG_FILE" ]]; then
+        echo -e "${GREEN}✅ 設定ファイルにアクセス可能です${NC}"
+        ((tests_passed++))
+    else
+        echo -e "${RED}❌ 設定ファイルにアクセスできません${NC}"
+    fi
+    
+    # ログディレクトリテスト
+    echo -e "${CYAN}📝 ログディレクトリテスト:${NC}"
+    ((tests_total++))
+    if [[ -d "$LOG_DIR" ]] && [[ -w "$LOG_DIR" ]]; then
+        echo -e "${GREEN}✅ ログディレクトリに書き込み可能です${NC}"
+        ((tests_passed++))
+    else
+        echo -e "${RED}❌ ログディレクトリに書き込みできません${NC}"
+    fi
+    
+    # 通知テスト
+    echo -e "${CYAN}🔔 通知テスト:${NC}"
+    ((tests_total++))
+    if [[ "$OSTYPE" == "darwin"* ]] || command -v notify-send &> /dev/null; then
+        echo -e "${GREEN}✅ 通知機能が利用可能です${NC}"
+        send_notification "Media-to-Media" "テスト通知です" "Ping"
+        ((tests_passed++))
+    else
+        echo -e "${YELLOW}⚠️  通知機能は利用できません${NC}"
+    fi
+    
+    echo
+    echo -e "${CYAN}📊 テスト結果: ${tests_passed}/${tests_total} 通過${NC}"
+    
+    if [[ $tests_passed -eq $tests_total ]]; then
+        echo -e "${GREEN}🎉 すべてのテストに合格しました！${NC}"
+    else
+        echo -e "${YELLOW}⚠️  一部のテストが失敗しました${NC}"
+    fi
+}
+
+# メイン処理
+main() {
+    case $1 in
+        show|"")
+            show_config
+            ;;
+        stats)
+            show_stats
+            ;;
+        set)
+            if [[ -z "$2" || -z "$3" ]]; then
+                echo -e "${RED}❌ エラー: 設定項目と値を指定してください${NC}"
+                echo "例: media-config set PARALLEL_JOBS 8"
+                exit 1
+            fi
+            update_config "$2" "$3"
+            ;;
+        reset)
+            echo -e "${YELLOW}⚠️  設定をデフォルトにリセットしますか？ (y/N): ${NC}"
+            read -r response
+            if [[ "$response" =~ ^[Yy]$ ]]; then
+                echo "$DEFAULT_CONFIG" > "$CONFIG_FILE"
+                echo -e "${GREEN}✅ 設定をリセットしました${NC}"
+                log_info "設定リセット実行"
+            else
+                echo -e "${BLUE}キャンセルしました${NC}"
+            fi
+            ;;
+        logs)
+            show_logs "${2:-50}"
+            ;;
+        cleanup)
+            cleanup_logs
+            ;;
+        update)
+            check_updates
+            ;;
+        test)
+            run_tests
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo -e "${RED}❌ 不明なコマンド: $1${NC}"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+# メイン実行
+main "$@" 

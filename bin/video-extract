@@ -1,0 +1,369 @@
+#!/bin/bash
+
+# 共通ライブラリを読み込み
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+# 使用方法
+usage() {
+    echo -e "${CYAN}${BOLD}🎬 動画静止画抽出ツール${NC}"
+    echo
+    echo -e "${CYAN}使用方法:${NC}"
+    echo "  video-extract [オプション] video1.mp4 [video2.mp4 ...]"
+    echo
+    echo -e "${CYAN}オプション:${NC}"
+    echo "  -h, --help       このヘルプを表示"
+    echo "  -o, --output     出力ディレクトリを指定"
+    echo "  -f, --format     出力形式 (png, jpg) [デフォルト: jpg]"
+    echo "  -q, --quality    JPG品質 (1-100) [デフォルト: 90]"
+    echo "  -s, --size       出力解像度 (例: 1920x1080)"
+    echo "  -i, --interval   抽出間隔（秒） [デフォルト: 10]"
+    echo "  -t, --time       特定の時間で抽出 (例: 00:01:30)"
+    echo "  -n, --number     抽出する枚数を指定"
+    echo "  --thumbnail      サムネイル抽出（開始・中間・終了）"
+    echo "  --keyframes      キーフレームのみ抽出"
+    echo "  --organize       日付別にディレクトリを作成"
+    echo
+    echo -e "${CYAN}例:${NC}"
+    echo "  video-extract video.mp4"
+    echo "  video-extract -i 5 -f png *.mp4"
+    echo "  video-extract -t 00:01:30 video.mp4"
+    echo "  video-extract --thumbnail -o ~/Images *.mp4"
+    echo "  video-extract -n 10 --keyframes video.mp4"
+}
+
+# オプション解析
+OUTPUT_DIR=""
+FORMAT="jpg"
+QUALITY=""
+SIZE=""
+INTERVAL="10"
+SPECIFIC_TIME=""
+NUMBER=""
+THUMBNAIL_MODE=false
+KEYFRAMES_ONLY=false
+ORGANIZE_OUTPUT=false
+FILES=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -o|--output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -f|--format)
+            FORMAT="$2"
+            shift 2
+            ;;
+        -q|--quality)
+            QUALITY="$2"
+            shift 2
+            ;;
+        -s|--size)
+            SIZE="$2"
+            shift 2
+            ;;
+        -i|--interval)
+            INTERVAL="$2"
+            shift 2
+            ;;
+        -t|--time)
+            SPECIFIC_TIME="$2"
+            shift 2
+            ;;
+        -n|--number)
+            NUMBER="$2"
+            shift 2
+            ;;
+        --thumbnail)
+            THUMBNAIL_MODE=true
+            shift
+            ;;
+        --keyframes)
+            KEYFRAMES_ONLY=true
+            shift
+            ;;
+        --organize)
+            ORGANIZE_OUTPUT=true
+            shift
+            ;;
+        -*)
+            echo -e "${RED}❌ 不明なオプション: $1${NC}"
+            usage
+            exit 1
+            ;;
+        *)
+            FILES+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# ファイル引数チェック
+if [[ ${#FILES[@]} -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+# フォーマットチェック
+if [[ "$FORMAT" != "jpg" && "$FORMAT" != "png" ]]; then
+    echo -e "${RED}❌ エラー: サポートされていない形式: $FORMAT${NC}"
+    echo -e "${YELLOW}サポート形式: jpg, png${NC}"
+    exit 1
+fi
+
+# 品質設定
+if [[ -z "$QUALITY" ]]; then
+    QUALITY=${JPG_QUALITY:-90}
+fi
+
+# 依存関係チェック
+if ! check_dependency "ffmpeg" "ffmpeg"; then
+    echo -e "${YELLOW}macOS: brew install ffmpeg${NC}"
+    echo -e "${YELLOW}Ubuntu: sudo apt install ffmpeg${NC}"
+    exit 1
+fi
+
+# 動画情報取得
+get_video_info() {
+    local video=$1
+    local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$video" 2>/dev/null)
+    local fps=$(ffprobe -v quiet -show_entries stream=r_frame_rate -select_streams v:0 -of default=noprint_wrappers=1:nokey=1 "$video" 2>/dev/null | head -1)
+    local resolution=$(ffprobe -v quiet -show_entries stream=width,height -select_streams v:0 -of csv=s=x:p=0 "$video" 2>/dev/null)
+    
+    # FPS計算
+    if [[ "$fps" == *"/"* ]]; then
+        local num=${fps%/*}
+        local den=${fps#*/}
+        fps=$(echo "scale=2; $num / $den" | bc 2>/dev/null || echo "30")
+    fi
+    
+    echo "duration=${duration:-0} fps=${fps:-30} resolution=${resolution:-unknown}"
+}
+
+# 出力ディレクトリ生成
+generate_output_dir() {
+    local video=$1
+    local base_output_dir=$2
+    
+    local basename=$(basename "$video")
+    local filename="${basename%.*}"
+    
+    if [[ "$ORGANIZE_OUTPUT" == "true" ]]; then
+        local date_dir=$(date +%Y-%m-%d)
+        local output_dir="$base_output_dir/$date_dir/$filename"
+    elif [[ -n "$base_output_dir" ]]; then
+        local output_dir="$base_output_dir/$filename"
+    else
+        local output_dir="${video%.*}_frames"
+    fi
+    
+    mkdir -p "$output_dir"
+    echo "$output_dir"
+}
+
+# 静止画抽出
+extract_frames() {
+    local video=$1
+    local output_dir=$2
+    local basename=$(basename "$video")
+    local filename="${basename%.*}"
+    
+    echo -e "${BLUE}📹 動画情報を取得中...${NC}"
+    local video_info=$(get_video_info "$video")
+    eval "$video_info"
+    
+    echo -e "${BLUE}   解像度: ${resolution} | FPS: ${fps} | 長さ: $(format_duration ${duration%.*})${NC}"
+    
+    local ffmpeg_opts=()
+    local output_pattern="$output_dir/${filename}_%04d.$FORMAT"
+    
+    # サイズ指定
+    if [[ -n "$SIZE" ]]; then
+        ffmpeg_opts+=(-vf "scale=$SIZE")
+    fi
+    
+    # 品質設定
+    if [[ "$FORMAT" == "jpg" ]]; then
+        ffmpeg_opts+=(-q:v "$QUALITY")
+    fi
+    
+    local extraction_count=0
+    
+    if [[ "$THUMBNAIL_MODE" == "true" ]]; then
+        # サムネイル抽出（開始・中間・終了）
+        echo -e "${BLUE}🖼️  サムネイル抽出中...${NC}"
+        
+        local start_time="00:00:01"
+        local mid_time=$(echo "scale=0; ${duration%.*} / 2" | bc)
+        local end_time=$(echo "scale=0; ${duration%.*} - 1" | bc)
+        
+        # 開始
+        if ffmpeg -i "$video" -ss "$start_time" -vframes 1 "${ffmpeg_opts[@]}" "$output_dir/${filename}_start.$FORMAT" -loglevel error -hide_banner 2>/dev/null; then
+            ((extraction_count++))
+        fi
+        
+        # 中間
+        if ffmpeg -i "$video" -ss "$mid_time" -vframes 1 "${ffmpeg_opts[@]}" "$output_dir/${filename}_middle.$FORMAT" -loglevel error -hide_banner 2>/dev/null; then
+            ((extraction_count++))
+        fi
+        
+        # 終了
+        if ffmpeg -i "$video" -ss "$end_time" -vframes 1 "${ffmpeg_opts[@]}" "$output_dir/${filename}_end.$FORMAT" -loglevel error -hide_banner 2>/dev/null; then
+            ((extraction_count++))
+        fi
+        
+    elif [[ -n "$SPECIFIC_TIME" ]]; then
+        # 特定時間での抽出
+        echo -e "${BLUE}⏰ 特定時間での抽出中... (${SPECIFIC_TIME})${NC}"
+        
+        if ffmpeg -i "$video" -ss "$SPECIFIC_TIME" -vframes 1 "${ffmpeg_opts[@]}" "$output_dir/${filename}_${SPECIFIC_TIME//:/-}.$FORMAT" -loglevel error -hide_banner 2>/dev/null; then
+            extraction_count=1
+        fi
+        
+    elif [[ "$KEYFRAMES_ONLY" == "true" ]]; then
+        # キーフレーム抽出
+        echo -e "${BLUE}🔑 キーフレーム抽出中...${NC}"
+        
+        local keyframe_opts=(-vf "select='eq(pict_type,PICT_TYPE_I)'")
+        if [[ -n "$NUMBER" ]]; then
+            keyframe_opts=(-vf "select='eq(pict_type,PICT_TYPE_I)',select='not(mod(n,$((${duration%.*} / NUMBER))))'")
+        fi
+        
+        if ffmpeg -i "$video" "${keyframe_opts[@]}" "${ffmpeg_opts[@]}" -vsync vfr "$output_pattern" -loglevel error -hide_banner 2>/dev/null; then
+            extraction_count=$(find "$output_dir" -name "${filename}_*.$FORMAT" | wc -l)
+        fi
+        
+    elif [[ -n "$NUMBER" ]]; then
+        # 指定枚数での抽出
+        echo -e "${BLUE}🎯 指定枚数での抽出中... (${NUMBER}枚)${NC}"
+        
+        local frame_interval=$(echo "scale=2; ${duration%.*} / $NUMBER" | bc)
+        if ffmpeg -i "$video" -vf "fps=1/$frame_interval" "${ffmpeg_opts[@]}" "$output_pattern" -loglevel error -hide_banner 2>/dev/null; then
+            extraction_count=$(find "$output_dir" -name "${filename}_*.$FORMAT" | wc -l)
+        fi
+        
+    else
+        # 間隔指定での抽出
+        echo -e "${BLUE}⏱️  間隔指定での抽出中... (${INTERVAL}秒間隔)${NC}"
+        
+        if ffmpeg -i "$video" -vf "fps=1/$INTERVAL" "${ffmpeg_opts[@]}" "$output_pattern" -loglevel error -hide_banner 2>/dev/null; then
+            extraction_count=$(find "$output_dir" -name "${filename}_*.$FORMAT" | wc -l)
+        fi
+    fi
+    
+    if [[ $extraction_count -gt 0 ]]; then
+        echo -e "${GREEN}   ✅ ${extraction_count}枚の静止画を抽出しました${NC}"
+        
+        # ファイルサイズ計算
+        local total_size=0
+        while IFS= read -r -d '' file; do
+            local size=$(get_file_size "$file")
+            total_size=$((total_size + size))
+        done < <(find "$output_dir" -name "${filename}_*.$FORMAT" -print0)
+        
+        echo -e "${BLUE}   出力サイズ: $(format_size $total_size)${NC}"
+        log_success "静止画抽出完了: $video → $extraction_count枚"
+        return 0
+    else
+        echo -e "${RED}   ❌ 静止画の抽出に失敗しました${NC}"
+        log_error "静止画抽出エラー: $video"
+        return 1
+    fi
+}
+
+# メイン処理
+main() {
+    local files=("${FILES[@]}")
+    local total=${#files[@]}
+    local start_time=$(date +%s)
+    local successful=0
+    local failed=0
+    local total_extracted=0
+    
+    echo -e "${PURPLE}🎬 動画静止画抽出を開始します${NC}"
+    echo -e "${WHITE}ファイル数: $total | 形式: ${FORMAT^^} | 品質: $QUALITY${NC}"
+    
+    if [[ "$THUMBNAIL_MODE" == "true" ]]; then
+        echo -e "${WHITE}モード: サムネイル抽出${NC}"
+    elif [[ -n "$SPECIFIC_TIME" ]]; then
+        echo -e "${WHITE}モード: 特定時間抽出 ($SPECIFIC_TIME)${NC}"
+    elif [[ "$KEYFRAMES_ONLY" == "true" ]]; then
+        echo -e "${WHITE}モード: キーフレーム抽出${NC}"
+    elif [[ -n "$NUMBER" ]]; then
+        echo -e "${WHITE}モード: 指定枚数抽出 (${NUMBER}枚)${NC}"
+    else
+        echo -e "${WHITE}モード: 間隔抽出 (${INTERVAL}秒)${NC}"
+    fi
+    
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        echo -e "${WHITE}出力: $OUTPUT_DIR${NC}"
+    fi
+    echo
+    
+    local current=0
+    for file in "${files[@]}"; do
+        ((current++))
+        
+        if ! check_file_extension "$file" "mp4" && 
+           ! check_file_extension "$file" "mov" && 
+           ! check_file_extension "$file" "avi" && 
+           ! check_file_extension "$file" "mkv"; then
+            echo -e "${YELLOW}📁 ファイル ${current}/${total}: $(basename "$file")${NC}"
+            echo -e "${YELLOW}   ⚠️  スキップ: 対応していない動画形式${NC}"
+            ((failed++))
+            continue
+        fi
+        
+        # ファイル検証
+        if ! verify_file "$file" "video"; then
+            echo -e "${YELLOW}📁 ファイル ${current}/${total}: $(basename "$file")${NC}"
+            echo -e "${RED}   ❌ 無効な動画ファイル${NC}"
+            ((failed++))
+            continue
+        fi
+        
+        echo -e "${YELLOW}📁 ファイル ${current}/${total}: $(basename "$file")${NC}"
+        
+        local input_size=$(get_file_size "$file")
+        echo -e "${BLUE}   入力サイズ: $(format_size $input_size)${NC}"
+        
+        local output_dir=$(generate_output_dir "$file" "$OUTPUT_DIR")
+        echo -e "${BLUE}   出力先: $(basename "$output_dir")${NC}"
+        
+        if extract_frames "$file" "$output_dir"; then
+            ((successful++))
+            # 抽出した枚数を計算
+            local basename=$(basename "$file")
+            local filename="${basename%.*}"
+            local extracted=$(find "$output_dir" -name "${filename}_*.$FORMAT" 2>/dev/null | wc -l)
+            total_extracted=$((total_extracted + extracted))
+        else
+            ((failed++))
+        fi
+        
+        show_progress $current $total
+        echo
+    done
+    
+    local end_time=$(date +%s)
+    local total_duration=$((end_time - start_time))
+    
+    echo -e "${GREEN}🎉 静止画抽出が完了しました！${NC}"
+    echo -e "${WHITE}成功: $successful | 失敗: $failed | 総抽出枚数: $total_extracted${NC}"
+    echo -e "${WHITE}総処理時間: $(format_duration $total_duration)${NC}"
+    
+    # 通知送信
+    if [[ $total_extracted -gt 0 ]]; then
+        send_notification "Media-to-Media" "${total_extracted}枚の静止画を抽出しました" "Glass"
+    fi
+    
+    log_info "静止画抽出完了: 成功=$successful, 失敗=$failed, 抽出枚数=$total_extracted, 時間=${total_duration}s"
+}
+
+# メイン実行
+main 

@@ -6,21 +6,117 @@ source "$SCRIPT_DIR/../lib/common.sh"
 
 # 使用方法
 usage() {
+    echo -e "${CYAN}${BOLD}🎵 MP4→MP3変換ツール (v1.1.0)${NC}"
+    echo
     echo -e "${CYAN}使用方法:${NC}"
-    echo "  mp4tomp3 file1.mp4 [file2.mp4 ...]"
+    echo "  mp4tomp3 [オプション] file1.mp4 [file2.mp4 ...]"
+    echo
+    echo -e "${CYAN}オプション:${NC}"
+    echo "  -h, --help       このヘルプを表示"
+    echo "  -q, --quality    音質を指定 (128k, 192k, 256k, 320k)"
+    echo "  -j, --jobs       並列処理数を指定"
+    echo "  -o, --output     出力ディレクトリを指定"
+    echo "  -v, --verify     変換後にファイルを検証"
+    echo "  --config         設定を表示"
+    echo "  --stats          統計を表示"
+    echo "  --no-notify      通知を無効化"
     echo
     echo -e "${CYAN}説明:${NC}"
-    echo "  MP4ファイルをMP3（192kbps）に変換します"
+    echo "  MP4ファイルをMP3に変換します"
+    echo "  設定ファイル: ${WHITE}$CONFIG_FILE${NC}"
     echo
     echo -e "${CYAN}例:${NC}"
     echo "  mp4tomp3 video.mp4"
-    echo "  mp4tomp3 *.mp4"
+    echo "  mp4tomp3 -q 320k *.mp4"
+    echo "  mp4tomp3 -j 8 -o ~/Music *.mp4"
 }
 
-# ヘルプオプションの処理
-if [[ "$1" == "-h" || "$1" == "--help" || $# -eq 0 ]]; then
+# オプション解析
+QUALITY=""
+JOBS=""
+OUTPUT_DIR=""
+VERIFY_FILES=false
+SHOW_CONFIG=false
+SHOW_STATS=false
+DISABLE_NOTIFY=false
+FILES=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -q|--quality)
+            QUALITY="$2"
+            shift 2
+            ;;
+        -j|--jobs)
+            JOBS="$2"
+            shift 2
+            ;;
+        -o|--output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -v|--verify)
+            VERIFY_FILES=true
+            shift
+            ;;
+        --config)
+            SHOW_CONFIG=true
+            shift
+            ;;
+        --stats)
+            SHOW_STATS=true
+            shift
+            ;;
+        --no-notify)
+            DISABLE_NOTIFY=true
+            shift
+            ;;
+        -*)
+            echo -e "${RED}❌ 不明なオプション: $1${NC}"
+            usage
+            exit 1
+            ;;
+        *)
+            FILES+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# 設定・統計表示
+if [[ "$SHOW_CONFIG" == "true" ]]; then
+    show_config
+    exit 0
+fi
+
+if [[ "$SHOW_STATS" == "true" ]]; then
+    show_stats
+    exit 0
+fi
+
+# ファイル引数チェック
+if [[ ${#FILES[@]} -eq 0 ]]; then
     usage
     exit 0
+fi
+
+# 通知設定
+if [[ "$DISABLE_NOTIFY" == "true" ]]; then
+    ENABLE_NOTIFICATIONS=false
+fi
+
+# 品質設定
+if [[ -n "$QUALITY" ]]; then
+    MP3_QUALITY="$QUALITY"
+fi
+
+# 並列処理数設定
+if [[ -n "$JOBS" ]]; then
+    PARALLEL_JOBS="$JOBS"
 fi
 
 # 依存関係チェック
@@ -30,47 +126,147 @@ if ! check_dependency "ffmpeg" "ffmpeg"; then
     exit 1
 fi
 
+# 出力ディレクトリ作成
+if [[ -n "$OUTPUT_DIR" ]] && [[ ! -d "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR"
+    log_info "出力ディレクトリを作成: $OUTPUT_DIR"
+fi
+
 # MP4→MP3変換関数
-mp4tomp3() {
-    local files=("$@")
-    local total=${#files[@]}
-    local current=0
-    local start_time=$(date +%s)
+convert_mp4_to_mp3() {
+    local file=$1
+    local file_start=$(date +%s)
     
-    echo -e "${PURPLE}🎵 MP4→MP3変換を開始します (${total}ファイル)${NC}\n"
+    if ! check_file_extension "$file" "mp4"; then
+        return 1
+    fi
     
-    for file in "${files[@]}"; do
-        if check_file_extension "$file" "mp4"; then
-            ((current++))
-            output="${file%.*}.mp3"
-            input_size=$(get_file_size "$file")
-            
-            echo -e "${YELLOW}📁 ファイル ${current}/${total}:${NC} $(basename "$file")"
-            echo -e "${BLUE}   入力サイズ:${NC} $(format_size $input_size)"
-            echo -e "${BLUE}   出力先:${NC} $(basename "$output")"
-            
-            # 変換実行
-            local file_start=$(date +%s)
-            if ffmpeg -i "$file" -vn -acodec mp3 -ab 192k "$output" -loglevel error -hide_banner; then
-                local file_end=$(date +%s)
-                local file_duration=$((file_end - file_start))
-                local output_size=$(get_file_size "$output")
-                
-                echo -e "${GREEN}   ✅ 完了${NC} ($(format_duration $file_duration)) - 出力: $(format_size $output_size)"
-                show_progress $current $total
-                echo
+    # ファイル検証
+    if ! verify_file "$file" "video"; then
+        echo -e "${RED}   ❌ 無効なMP4ファイル: $file${NC}"
+        log_error "無効なMP4ファイル: $file"
+        return 1
+    fi
+    
+    # 出力ファイル名決定
+    local basename=$(basename "$file" .mp4)
+    local output
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        output="$OUTPUT_DIR/$basename.mp3"
+    else
+        output="${file%.*}.mp3"
+    fi
+    
+    # 既存ファイルチェック
+    if [[ -f "$output" ]]; then
+        echo -e "${YELLOW}   ⚠️  スキップ: $output は既に存在します${NC}"
+        log_info "スキップ: $output (既存ファイル)"
+        return 0
+    fi
+    
+    local input_size=$(get_file_size "$file")
+    echo -e "${BLUE}   入力サイズ:${NC} $(format_size $input_size)"
+    echo -e "${BLUE}   音質:${NC} $MP3_QUALITY"
+    echo -e "${BLUE}   出力先:${NC} $(basename "$output")"
+    
+    # 変換実行
+    if ffmpeg -i "$file" -vn -acodec mp3 -ab "$MP3_QUALITY" "$output" -loglevel error -hide_banner 2>/dev/null; then
+        local file_end=$(date +%s)
+        local file_duration=$((file_end - file_start))
+        local output_size=$(get_file_size "$output")
+        
+        echo -e "${GREEN}   ✅ 完了${NC} ($(format_duration $file_duration)) - 出力: $(format_size $output_size)"
+        log_success "MP4→MP3変換完了: $file → $output"
+        
+        # ファイル検証
+        if [[ "$VERIFY_FILES" == "true" ]]; then
+            if verify_file "$output" "audio"; then
+                echo -e "${GREEN}   🔍 検証: OK${NC}"
             else
-                echo -e "${RED}   ❌ エラー: 変換に失敗しました${NC}"
+                echo -e "${RED}   🔍 検証: エラー${NC}"
+                log_error "変換ファイル検証エラー: $output"
             fi
         fi
+        
+        # 元ファイル削除（設定による）
+        if [[ "$DELETE_ORIGINAL" == "true" ]]; then
+            rm "$file"
+            log_info "元ファイルを削除: $file"
+        fi
+        
+        return 0
+    else
+        echo -e "${RED}   ❌ エラー: 変換に失敗しました${NC}"
+        log_error "MP4→MP3変換エラー: $file"
+        return 1
+    fi
+}
+
+# メイン処理
+main() {
+    local files=("${FILES[@]}")
+    local total=${#files[@]}
+    local start_time=$(date +%s)
+    local successful=0
+    local failed=0
+    
+    echo -e "${PURPLE}🎵 MP4→MP3変換を開始します${NC}"
+    echo -e "${WHITE}ファイル数: $total | 並列処理: $PARALLEL_JOBS | 音質: $MP3_QUALITY${NC}"
+    echo
+    
+    # 並列処理用ジョブ配列作成
+    local jobs=()
+    local current=0
+    
+    for file in "${files[@]}"; do
+        ((current++))
+        jobs+=("echo -e '${YELLOW}📁 ファイル ${current}/${total}:${NC} $(basename "$file")' && convert_mp4_to_mp3 '$file' && echo")
+    done
+    
+    # 並列実行
+    if [[ $PARALLEL_JOBS -gt 1 ]] && [[ $total -gt 1 ]]; then
+        echo -e "${BLUE}🚀 並列処理で変換を実行します...${NC}"
+        run_parallel $PARALLEL_JOBS "${jobs[@]}"
+    else
+        # 逐次実行
+        for job in "${jobs[@]}"; do
+            eval "$job"
+            ((current++))
+            show_progress $current $total
+        done
         echo
+    fi
+    
+    # 結果集計
+    for file in "${files[@]}"; do
+        local basename=$(basename "$file" .mp4)
+        local output
+        if [[ -n "$OUTPUT_DIR" ]]; then
+            output="$OUTPUT_DIR/$basename.mp3"
+        else
+            output="${file%.*}.mp3"
+        fi
+        
+        if [[ -f "$output" ]]; then
+            ((successful++))
+        else
+            ((failed++))
+        fi
     done
     
     local end_time=$(date +%s)
     local total_duration=$((end_time - start_time))
-    echo -e "\n${GREEN}🎉 すべての変換が完了しました！${NC}"
-    echo -e "${WHITE}総処理時間: $(format_duration $total_duration)${NC}"
+    
+    echo -e "${GREEN}🎉 変換処理が完了しました！${NC}"
+    echo -e "${WHITE}成功: $successful | 失敗: $failed | 総処理時間: $(format_duration $total_duration)${NC}"
+    
+    # 通知送信
+    if [[ $successful -gt 0 ]]; then
+        send_notification "Media-to-Media" "$successful個のMP4ファイルをMP3に変換しました" "Glass"
+    fi
+    
+    log_info "MP4→MP3一括変換完了: 成功=$successful, 失敗=$failed, 時間=${total_duration}s"
 }
 
 # メイン実行
-mp4tomp3 "$@" 
+main 
